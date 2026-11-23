@@ -115,16 +115,6 @@ task<void> MainWindow::Init() {
   AddEventListener(
     mKneeboard->evActiveViewChangedEvent,
     std::bind_front(&MainWindow::ResetKneeboardView, this));
-  if (!IsElevated()) {
-    AddEventListener(mKneeboard->evGameChangedEvent, [this](DWORD pid, auto) {
-      if (pid) {
-        // While OpenXR will create an elevated consumer, for injection-based
-        // approaches, injection will fail, so we need to catch them here
-        this->ShowWarningIfElevated(pid);
-      }
-    });
-  }
-
   AddEventListener(
     mKneeboard->GetTabsList()->evTabsChangedEvent,
     std::bind_front(&MainWindow::OnTabsChanged, this));
@@ -263,74 +253,6 @@ task<void> MainWindow::FrameLoop() {
   co_return;
 }
 
-void MainWindow::CheckForElevatedConsumer() {
-  if (IsElevated()) {
-    return;
-  }
-
-  const auto pid = SHM::ActiveConsumers::Get().mElevatedConsumerProcessID;
-  if (!pid) {
-    return;
-  }
-
-  ShowWarningIfElevated(pid);
-}
-
-OpenKneeboard::fire_and_forget MainWindow::ShowWarningIfElevated(DWORD pid) {
-  if (pid == mElevatedConsumerProcessID) {
-    co_return;
-  }
-
-  co_await winrt::resume_background();
-
-  std::filesystem::path path;
-  {
-    winrt::handle handle {
-      OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)};
-    if (!handle) {
-      co_return;
-    }
-    if (!IsElevated(handle.get())) {
-      co_return;
-    }
-
-    wchar_t buf[MAX_PATH];
-    auto size = static_cast<DWORD>(std::size(buf));
-    if (!QueryFullProcessImageNameW(handle.get(), 0, buf, &size)) {
-      co_return;
-    }
-    path = std::wstring_view {buf, size};
-  }
-
-  mElevatedConsumerProcessID = pid;
-
-  co_await mUIThread;
-
-  const auto message = std::format(
-    _(L"'{}' (process {}) is running elevated; this WILL cause "
-      L"problems.\n\nIt "
-      L"is STRONGLY recommended that you do not run games elevated.\n\n"
-      L"Running games as administrator is unsupported;\n"
-      L"DO NOT ASK FOR HELP AND DO NOT REPORT ANY BUGS."),
-    path.filename().wstring(),
-    pid);
-
-  ContentDialog dialog;
-  dialog.XamlRoot(Navigation().XamlRoot());
-
-  dialog.Title(box_value(to_hstring(_(L"Game is running as administrator"))));
-  dialog.Content(box_value(message));
-  dialog.PrimaryButtonText(_(L"OK"));
-  dialog.DefaultButton(ContentDialogButton::Primary);
-
-  dprint.Warning(
-    "Showing game elevation warning dialog for PID {} ({})",
-    pid,
-    path.filename().string());
-  co_await dialog.ShowAsync();
-  dprint("Game elevation warning dialog closed.");
-}
-
 task<void> MainWindow::FrameTick(
   std::chrono::steady_clock::time_point nextFrameAt) {
   TraceLoggingActivity<gTraceProvider> activity;
@@ -357,7 +279,6 @@ task<void> MainWindow::FrameTick(
   }
   TraceLoggingWriteTagged(activity, "Acquired shared kneeboard locked");
 
-  this->CheckForElevatedConsumer();
   OPENKNEEBOARD_TraceLoggingScope("evFrameTimerPreEvent.emit()");
   mKneeboard->evFrameTimerPreEvent.Emit();
   TraceLoggingWriteTagged(activity, "Prepared to render");
@@ -570,10 +491,6 @@ OpenKneeboard::fire_and_forget MainWindow::UpdateProfileSwitcherVisibility() {
   std::wstring title(L"OpenKneeboard");
 
   const scope_exit setTitle([&title, this]() {
-    if (IsElevated()) {
-      title += L" [Administrator]";
-    }
-
     if (!Version::IsStableRelease) {
       if (Version::IsTaggedVersion) {
         title += std::format(L" - PRERELEASE {}", to_hstring(Version::TagName));

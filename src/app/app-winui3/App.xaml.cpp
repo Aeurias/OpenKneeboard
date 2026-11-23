@@ -251,12 +251,8 @@ static void BackupSettings() {
 
 enum class DamagingEnvironmentFlags : uint8_t {
   None = 0,
-  Fatal = (1 << 0),
-  ElevationRelated = (1 << 1),
-  IsElevated = (1 << 2) | ElevationRelated | Fatal,
-  UacIsDisabled = (1 << 3) | ElevationRelated | Fatal,
-  OlderThanWin10 = (1 << 4),
-  Wine = (1 << 5),
+  OlderThanWin10 = (1 << 0),
+  Wine = (1 << 1),
 };
 
 constexpr bool supports_bitflags(DamagingEnvironmentFlags) { return true; }
@@ -273,12 +269,7 @@ static void ShowDamagingEnvironmentError(const DamagingEnvironmentFlags flags) {
     return;
   }
 
-  std::wstring_view elevationProblem;
-  if ((flags & IsElevated) == IsElevated) {
-    elevationProblem = _(L"OpenKneeboard is running elevated");
-  } else if ((flags & UacIsDisabled) == UacIsDisabled) {
-    elevationProblem = _(L"User Account Control (UAC) is disabled");
-  } else if ((flags & OlderThanWin10) == OlderThanWin10) {
+  if ((flags & OlderThanWin10) == OlderThanWin10) {
     MessageBoxW(
       nullptr,
       _(L"Your version of Windows is too old to run OpenKneeboard.\n\n"
@@ -288,32 +279,11 @@ static void ShowDamagingEnvironmentError(const DamagingEnvironmentFlags flags) {
       L"OpenKneeboard",
       MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
     return;
-  } else {
-    dprint.Error(
-      "Damaging environment error, but no recognized flags: {:#x}",
-      std::to_underlying(flags));
-    return;
   }
 
-  OPENKNEEBOARD_ASSERT((flags & ElevationRelated) == ElevationRelated);
-  OPENKNEEBOARD_ASSERT(!elevationProblem.empty());
-
-  const auto isFatal = (flags & Fatal) == Fatal;
-
-  const auto message = std::format(
-    _(L"{}; this is not supported.\n\n"
-      L"Turning off User Account Control or running software as administrator "
-      L"that is not intended to be ran as administrator can cause problems "
-      L"that can only reasonably be fixed by reinstalling Windows.\n\n"
-      L"This {} will not be removed."),
-    elevationProblem,
-    isFatal ? L"requirement" : L"warning");
-  const auto iconFlag = isFatal ? MB_ICONERROR : MB_ICONWARNING;
-  MessageBoxW(
-    nullptr,
-    message.c_str(),
-    L"OpenKneeboard",
-    MB_OK | MB_SETFOREGROUND | iconFlag);
+  dprint.Error(
+    "Damaging environment error, but no recognized flags: {:#x}",
+    std::to_underlying(flags));
 }
 
 [[nodiscard]]
@@ -327,19 +297,6 @@ static DamagingEnvironmentFlags LogSystemInformation() {
 
   const auto isWine = static_cast<bool>(
     GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version"));
-  const auto setWineFlags = scope_exit([&] {
-    if (isWine) {
-      if (
-        (ret & DamagingEnvironmentFlags::Fatal)
-        == DamagingEnvironmentFlags::Fatal) {
-        dprint.Warning(
-          "Allowing execution despite hard-blocked environment because Wine "
-          "detected; assuming checks are inaccurate");
-      }
-      ret = DamagingEnvironmentFlags::Wine;
-    }
-  });
-
   {
     OSVERSIONINFOEXA osVersion {sizeof(OSVERSIONINFOEXA)};
     winrt::check_bool(
@@ -393,53 +350,6 @@ static DamagingEnvironmentFlags LogSystemInformation() {
        }) {
     dprint(
       "  {}: {} {}", label, elevated ? "⚠️" : "✅", elevated ? "yes" : "no");
-  }
-
-  if (IsElevated()) {
-    ret |= DamagingEnvironmentFlags::IsElevated;
-  }
-
-  // Log UAC settings because lower values aren't just "do not prompt" - they
-  // will automatically run some things as administrator that otherwise would
-  // be ran as a normal user. This causes problems.
-  if (wil::unique_hkey hkey;
-      wil::reg::open_unique_key_nothrow(
-        HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
-        hkey)
-      == ERROR_SUCCESS) {
-    const auto enableLua =
-      wil::reg::try_get_value_dword(hkey.get(), L"EnableLUA").value_or(0);
-    const auto cpba =
-      wil::reg::try_get_value_dword(hkey.get(), L"ConsentPromptBehaviorAdmin")
-        .value_or(0);
-    for (auto&& [name, value, isValid]: {
-           std::tuple {"EnableLUA", enableLua, enableLua == 1},
-           std::tuple {
-             "ConsentPromptBehaviorAdmin", cpba, cpba >= 1 && cpba <= 5},
-         }) {
-      if (isValid) {
-        dprint("  UAC {0}: ✅ {1:#010x} ({1})", name, value);
-      } else {
-        dprint("  UAC {0}: ⚠️ {1:#010x} ({1})", name, value);
-        ret |= DamagingEnvironmentFlags::UacIsDisabled;
-        if (const auto hr = wil::reg::set_value_dword_nothrow(
-              HKEY_LOCAL_MACHINE,
-              Config::RegistrySubKey,
-              L"UacWasPreviouslyDisabled",
-              1);
-            FAILED(hr)) {
-          dprint.Warning(
-            "Failed to set UAC flag in registry: {:#010x}",
-            std::bit_cast<uint32_t>(hr));
-        }
-      }
-    }
-  }
-  if (wil::reg::try_get_value_dword(
-        HKEY_LOCAL_MACHINE, Config::RegistrySubKey, L"UacWasPreviouslyDisabled")
-        .value_or(0)) {
-    dprint.Warning("UAC was previously disabled.");
   }
 
   if (isWine) {
@@ -729,13 +639,6 @@ static int AppMain(
   if (const auto flags = LogSystemInformation();
       flags != DamagingEnvironmentFlags::None) {
     ShowDamagingEnvironmentError(flags);
-    if (
-      (flags & DamagingEnvironmentFlags::Fatal)
-      == DamagingEnvironmentFlags::Fatal) {
-      dprint.Warning(
-        L"Exiting with environment error: {:#010x}", std::to_underlying(flags));
-      return EXIT_FAILURE;
-    }
   }
   LogInstallationInformation();
   SetRegistryValues();

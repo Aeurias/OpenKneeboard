@@ -89,9 +89,6 @@ struct MainWindow : MainWindowT<MainWindow>,
   };
   TabSwitchReason mTabSwitchReason {TabSwitchReason::Other};
 
-  // Used to track whether or not we've shown an elevation warning
-  DWORD mElevatedConsumerProcessID {};
-
   void Show();
 
   // Used instead of a timer so there is always a positive amount
@@ -114,9 +111,6 @@ struct MainWindow : MainWindowT<MainWindow>,
   OpenKneeboard::fire_and_forget UpdateProfileSwitcherVisibility();
   OpenKneeboard::fire_and_forget RenameTab(std::shared_ptr<ITab>);
   void TriggerApplicationExit();
-
-  void CheckForElevatedConsumer();
-  OpenKneeboard::fire_and_forget ShowWarningIfElevated(DWORD pid);
 
   OpenKneeboard::fire_and_forget
   RenameBookmark(std::shared_ptr<ITab>, Bookmark, winrt::hstring title);
